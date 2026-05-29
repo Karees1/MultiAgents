@@ -16,7 +16,7 @@ User Input
     ▼
 ┌─────────────────────────────────────────────────┐
 │            SUPERVISOR / MANAGER AGENT           │
-│     (CrewAI hierarchical process manager)       │
+│   (LangGraph StateGraph — LLM-based routing)    │
 │  Decides task order, delegation, termination    │
 └────────────────────┬────────────────────────────┘
                      │ delegates to
@@ -57,7 +57,7 @@ User Input
              Final Plan Output
 ```
 
-**Communication Flow:** Sequential pipeline with shared context. Each agent receives output from previous agents via CrewAI's `context=` parameter. The hierarchical manager oversees all delegation and can re-route if needed. Human-in-the-loop pauses occur at the curation step.
+**Communication Flow:** Sequential pipeline with shared state. Each agent receives the full `AgentState` message history (all prior agent outputs). The LangGraph supervisor reads the last speaker's name and routes to the next agent. Human-in-the-loop pauses occur at the curation step via `interrupt_before`.
 
 ---
 
@@ -201,10 +201,10 @@ jupyter notebook demo.ipynb
 
 | Challenge | Solution |
 |-----------|----------|
-| **Groq rate limits** on free tier | Set `max_rpm=8` in Crew config; add delays between agent calls |
+| **Groq daily token limits** on free tier | Switch to `llama-4-scout-17b` (separate quota); fall back to deterministic supervisor to save tokens |
 | **Hallucinated platforms** (agent says "on Netflix" incorrectly) | Quality Reviewer agent with explicit fact-checking instructions |
-| **Agent loops** (agents re-running tasks) | Used `Process.hierarchical` with explicit termination via task completion |
-| **Context loss** between agents | Passed `context=[prev_tasks]` explicitly on every task |
+| **Agent routing loops** (supervisor re-calling same agent) | LLM supervisor given explicit last-speaker context; deterministic fallback prevents infinite loops |
+| **Context loss** between agents | Full `AgentState` message history passed to every node; agents read all prior outputs |
 | **Serendipity pick too random** | Curator agent given explicit constraint: "close enough to taste to be enjoyable" |
 
 ---
@@ -218,3 +218,5 @@ A single generalist agent attempting this task would face a fundamental tension:
 The multi-agent approach also enables a genuine critique loop that a single agent cannot provide for itself. Having the Quality Reviewer operate as an independent agent — with no memory of producing the plan — creates authentic skepticism. It approaches the plan as an outside evaluator would, catching errors and misalignments that the original agents, having produced the content, are cognitively "invested" in. The human-in-the-loop checkpoint at the curation stage further demonstrates a key advantage of multi-agent architecture: natural breakpoints where human judgment can intercept the workflow before irreversible decisions are made, a pattern that would be awkward to implement in a single-agent pipeline.
 
 Finally, the parallelization potential of multi-agent systems provides scalability benefits beyond this assignment. While this implementation runs sequentially, the architecture naturally supports running the Content Researcher and Genre Matcher in parallel, reducing latency. A single agent that internally "debates with itself" lacks this property. The division of labor also makes debugging and improvement straightforward: if recommendations are poor, only the Taste Matcher or Researcher prompts need tuning, rather than re-engineering a monolithic agent.
+
+One honest limitation surfaced during development: the LLM-based supervisor occasionally entered routing loops when the underlying model (LLaMA 3.3-70B on Groq's free tier) misread the conversation history. The solution was to supply the supervisor with explicit last-speaker context and a deterministic fallback — a reminder that in production multi-agent systems, supervisors often need a rule-based safety net alongside their LLM judgment. This trade-off between flexibility and reliability is a real engineering challenge the assignment exposed.

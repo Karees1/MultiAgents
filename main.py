@@ -88,22 +88,48 @@ class AgentState(TypedDict):
 
 PIPELINE = ["profiler", "researcher", "matcher", "curator", "planner", "reviewer"]
 
+from typing import Literal
+from pydantic import BaseModel
 
-# ── Supervisor (deterministic sequential router) ──────────────────────────────
+class Route(BaseModel):
+    next: Literal["profiler", "researcher", "matcher", "curator", "planner", "reviewer", "FINISH"]
+
 def supervisor_node(state: AgentState) -> dict:
-    """Routes to next agent in sequence based on who last responded."""
+    """LLM-based supervisor: reads conversation context and routes to the next agent."""
+    # Detect who last spoke to give the LLM explicit context
     last_agent = None
     for msg in reversed(state["messages"]):
         name = getattr(msg, "name", None)
         if name and name in PIPELINE:
             last_agent = name
             break
-    if last_agent is None:
-        return {"next": "profiler"}
-    idx = PIPELINE.index(last_agent)
-    if idx + 1 < len(PIPELINE):
-        return {"next": PIPELINE[idx + 1]}
-    return {"next": "FINISH"}
+
+    system = f"""You are the supervisor of an entertainment recommendation team.
+Pipeline (always sequential, never skip or go backwards):
+  profiler → researcher → matcher → curator → planner → reviewer → FINISH
+
+Last agent to respond: {last_agent or 'NONE — pipeline has not started yet'}
+
+Routing rules:
+- NONE       → profiler
+- profiler   → researcher
+- researcher → matcher
+- matcher    → curator
+- curator    → planner
+- planner    → reviewer
+- reviewer   → FINISH
+
+Return exactly the next agent name (or FINISH)."""
+
+    try:
+        result = llm.with_structured_output(Route).invoke([SystemMessage(content=system)])
+        return {"next": result.next}
+    except Exception:
+        # Deterministic fallback if LLM routing fails
+        if last_agent is None:
+            return {"next": "profiler"}
+        idx = PIPELINE.index(last_agent)
+        return {"next": PIPELINE[idx + 1] if idx + 1 < len(PIPELINE) else "FINISH"}
 
 
 # ── Agent Node Helpers ────────────────────────────────────────────────────────
@@ -120,12 +146,29 @@ def make_simple_node(system_prompt: str, name: str):
 
 
 # ── Specialized Agent Nodes ───────────────────────────────────────────────────
-profiler_node = make_simple_node(
-    "You are an entertainment preference profiler. "
-    "Analyze the user's request and return a JSON profile with: "
-    "genres, formats (movies/shows/music/games), mood, estimated_hours, liked_styles, exclusions.",
-    "profiler"
-)
+def profiler_node(state: AgentState) -> dict:
+    """Builds a taste profile, then calls genre_matcher to enrich genre mapping."""
+    # Step 1: extract raw preferences from user request
+    raw = call_llm(
+        "You are an entertainment preference profiler. "
+        "Extract from the user request a comma-separated list of genre/mood keywords "
+        "(e.g. 'sci-fi, action, relaxing'). Reply with ONLY the keywords.",
+        state
+    )
+    # Step 2: run genre_matcher tool to get structured genres
+    genre_map = genre_matcher.invoke({"preferences": raw})
+    # Step 3: build full JSON profile
+    profile_msgs = [
+        SystemMessage(content=(
+            "You are an entertainment preference profiler. "
+            "Using the keyword list and genre map below, return a complete JSON profile with: "
+            "genres, formats (movies/shows/music/games), mood, estimated_hours, liked_styles, exclusions.\n\n"
+            f"Keywords: {raw}\nGenre map: {genre_map}"
+        )),
+        *state["messages"]
+    ]
+    content = llm.invoke(profile_msgs).content
+    return {"messages": [AIMessage(content=content, name="profiler")]}
 
 matcher_node = make_simple_node(
     "You are a taste matcher. Score each item in the researcher's list (1-10) "
