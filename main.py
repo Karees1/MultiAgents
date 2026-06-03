@@ -211,30 +211,26 @@ def researcher_node(state: AgentState) -> dict:
 
 
 def curator_node(state: AgentState) -> dict:
-    # Run curator logic
+    # Check if the last message is human feedback injected via the HITL resume
+    human_feedback = ""
+    last_msg = state["messages"][-1] if state["messages"] else None
+    if last_msg and isinstance(last_msg, HumanMessage):
+        candidate = last_msg.content.strip().lower()
+        if candidate not in ("", "approved", "approve", "yes", "ok", "looks good", "approved, looks great!"):
+            human_feedback = last_msg.content.strip()
+
+    feedback_context = (
+        f"\n\nThe human reviewer said: '{human_feedback}' — incorporate this feedback."
+        if human_feedback else ""
+    )
+
     content = call_llm(
         "You are a diversity and serendipity curator. Review the top-5 ranked list: "
         "ensure 2+ content formats, max 2 items per exact genre. "
-        "Add one [SERENDIPITY PICK] slightly outside the user's usual taste. "
+        f"Add one [SERENDIPITY PICK] slightly outside the user's usual taste.{feedback_context} "
         "Return the final 5-item curated list with the serendipity pick clearly labeled.",
         state
     )
-
-    # Human-in-the-loop pause
-    print("\n" + "="*60)
-    print("HUMAN-IN-THE-LOOP: Diversity Curator proposes this list:")
-    print("="*60)
-    print(content[:800])
-    print("="*60)
-
-    feedback = interrupt({
-        "prompt": "Approve or type changes (press Enter to approve):",
-        "curated_list": content
-    })
-
-    if feedback and str(feedback).strip():
-        content = content + f"\n\n[Human feedback: {feedback}]"
-
     return {"messages": [AIMessage(content=content, name="curator")]}
 
 
@@ -328,19 +324,30 @@ def run(user_request: str):
     # Phase 1: run until HITL pause (before curator)
     stream_events(state, config)
 
-    # Handle HITL
+    # Handle HITL — graph is paused at interrupt_before=['curator']
     snapshot = graph.get_state(config)
     if snapshot.next:
+        # Show the matcher's top-5 so the user knows what they're approving
+        for msg in reversed(snapshot.values.get("messages", [])):
+            if getattr(msg, "name", None) == "matcher":
+                print("\n" + "="*60)
+                print("HUMAN-IN-THE-LOOP: Curator will work with this top-5 list.")
+                print("Review it below, then approve or suggest changes.")
+                print("="*60)
+                print(msg.content[:900])
+                break
+
         print("\n" + "="*60)
-        print("AWAITING YOUR APPROVAL (press Enter to approve, or type feedback):")
+        print("Press Enter to approve, or type feedback for the curator:")
         print("="*60)
         human_input = input("> ").strip()
 
-        # Resume with human input
-        stream_events(
-            {"messages": [HumanMessage(content=human_input or "Approved")]},
-            config
+        # inject human input into the checkpoint, then resume with None
+        graph.update_state(
+            config,
+            {"messages": [HumanMessage(content=human_input or "Approved")]}
         )
+        stream_events(None, config)
 
     # Final output
     final_msgs = graph.get_state(config).values.get("messages", [])
